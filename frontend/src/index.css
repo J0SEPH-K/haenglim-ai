@@ -1,0 +1,252 @@
+@import "tailwindcss";
+
+body {
+  background-color: #212121;
+  color: #e3e3e3;
+}
+
+/* Remove default browser container selection/focus/tap highlights */
+* {
+  -webkit-tap-highlight-color: transparent;
+}
+
+*:focus {
+  outline: none;
+}
+
+*:focus-visible {
+  outline: none;
+}
+
+button,
+a,
+[role="button"],
+[tabindex] {
+  -webkit-user-select: none;
+  -moz-user-select: none;
+  user-select: none;
+}
+
+input,
+textarea,
+[contenteditable="true"] {
+  -webkit-user-select: text;
+  -moz-user-select: text;
+  user-select: text;
+}
+
+/* Custom dark scrollbar */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: #3a3a3a transparent;
+}
+
+*::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+*::-webkit-scrollbar-thumb {
+  background: #3a3a3a;
+  border-radius: 3px;
+}
+
+*::-webkit-scrollbar-thumb:hover {
+  background: #4a4a4a;
+}
+
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+    transform: scale(0.9);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+@keyframes progress {
+  0% { width: 0%; }
+  50% { width: 85%; }
+  100% { width: 95%; }
+}
+
+/* Markdown styles for AI responses */
+.prose-dark {
+  font-size: 1rem;
+  line-height: 1.75;
+  color: #e3e3e3;
+}
+
+.prose-dark h1 {
+  font-size: 1.75rem;
+  font-weight: 700;
+  margin-top: 1.5rem;
+  margin-bottom: 0.75rem;
+  color: #fff;
+}
+
+.prose-dark h2 {
+  font-size: 1.4rem;
+  font-weight: 600;
+  margin-top: 1.25rem;
+  margin-bottom: 0.5rem;
+  color: #fff;
+}
+
+.prose-dark h3 {
+  font-size: 1.15rem;
+  font-weight: 600;
+  margin-top: 1rem;
+  margin-bottom: 0.5rem;
+  color: #fff;
+}
+
+.prose-dark h4, .prose-dark h5, .prose-dark h6 {
+  font-size: 1rem;
+  font-weight: 600;
+  margin-top: 0.75rem;
+  margin-bottom: 0.25rem;
+  color: #fff;
+}
+
+.prose-dark p {
+  margin-top: 0.5rem;
+  margin-bottom: 0.5rem;
+}
+
+.prose-dark strong {
+  color: #fff;
+  font-weight: 600;
+}
+
+.prose-dark em {
+  font-style: italic;
+}
+
+.prose-dark del {
+  text-decoration: line-through;
+  opacity: 0.6;
+}
+
+.prose-dark a {
+  color: #60a5fa;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.prose-dark a:hover {
+  color: #93bbfd;
+}
+
+.prose-dark ul {
+  list-style-type: disc;
+  padding-left: 1.5rem;
+  margin-top: 0.5rem;
+  margin-bottom: 0.5rem;
+}
+
+.prose-dark ol {
+  list-style-type: decimal;
+  padding-left: 1.5rem;
+  margin-top: 0.5rem;
+  margin-bottom: 0.5rem;
+}
+
+.prose-dark li {
+  margin-top: 0.25rem;
+  margin-bottom: 0.25rem;
+}
+
+.prose-dark li > ul, .prose-dark li > ol {
+  margin-top: 0.25rem;
+  margin-bottom: 0.25rem;
+}
+
+.prose-dark blockquote {
+  border-left: 3px solid #4a4a4a;
+  padding-left: 1rem;
+  margin-top: 0.75rem;
+  margin-bottom: 0.75rem;
+  color: #9ca3af;
+  font-style: italic;
+}
+
+.prose-dark code {
+  font-family: ui-monospace, 'Cascadia Code', 'Fira Code', Consolas, monospace;
+  font-size: 0.875rem;
+  background-color: #2f2f2f;
+  padding: 0.15rem 0.4rem;
+  border-radius: 0.25rem;
+  color: #f0abfc;
+}
+
+.prose-dark pre {
+  background-color: #1a1a1a;
+  border-radius: 0.75rem;
+  padding: 1rem;
+  margin-top: 0.75rem;
+  margin-bottom: 0.75rem;
+  overflow-x: auto;
+}
+
+.prose-dark pre code {
+  background: none;
+  padding: 0;
+  border-radius: 0;
+  color: #e3e3e3;
+  font-size: 0.85rem;
+  line-height: 1.6;
+}
+
+.prose-dark hr {
+  border: none;
+  border-top: 1px solid #3a3a3a;
+  margin-top: 1.5rem;
+  margin-bottom: 1.5rem;
+}
+
+.prose-dark table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-top: 0.75rem;
+  margin-bottom: 0.75rem;
+  font-size: 0.875rem;
+}
+
+.prose-dark th {
+  text-align: left;
+  font-weight: 600;
+  padding: 0.5rem 0.75rem;
+  border-bottom: 2px solid #3a3a3a;
+  color: #fff;
+}
+
+.prose-dark td {
+  padding: 0.5rem 0.75rem;
+  border-bottom: 1px solid #2f2f2f;
+}
+
+.prose-dark tr:hover {
+  background-color: #2a2a2a;
+}
+
+.prose-dark img {
+  border-radius: 0.5rem;
+  margin-top: 0.5rem;
+  margin-bottom: 0.5rem;
+  max-width: 100%;
+}
+
+.prose-dark > *:first-child {
+  margin-top: 0;
+}
+
+.prose-dark > *:last-child {
+  margin-bottom: 0;
+}
