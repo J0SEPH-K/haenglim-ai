@@ -59,52 +59,68 @@ class OpenAIAdapter(AIAdapter):
                     yield delta.content
 
     async def generate_image(self, prompt: str, model: str, params: dict) -> str:
-        style = params.get("style", "vivid")
-        dalle_styles = {"vivid", "natural"}
-        # Append non-native styles to the prompt
-        if style and style not in dalle_styles:
-            style_label = style.replace("-", " ")
-            prompt = f"{prompt}, in {style_label} style"
-            style = "vivid"
-
-        # DALL-E only supports 3 sizes — map others to nearest
+        # Honor the model the user actually selected (gpt-image-1 or dall-e-3).
+        model = model or "gpt-image-1"
         size = params.get("size", "1024x1024")
-        dalle_sizes = {"1024x1024", "1024x1792", "1792x1024"}
-        if size not in dalle_sizes:
-            w, h = map(int, size.split("x"))
-            ratio = w / h
-            if ratio > 1.2:
-                size = "1792x1024"
-            elif ratio < 0.8:
-                size = "1024x1792"
-            else:
-                size = "1024x1024"
+        style = params.get("style", "")
+        # Non-native styles aren't real API params for either family — fold into the prompt.
+        if style and style not in ("vivid", "natural"):
+            prompt = f"{prompt}, in {style.replace('-', ' ')} style"
+            style = ""
 
-        response = await self.client.images.generate(
-            model=model if "dall-e" in model.lower() else "dall-e-3",
-            prompt=prompt,
-            size=size,
-            style=style,
-            n=1,
-        )
+        if "dall-e" in model.lower():
+            # DALL·E 3: supports `style`; uses its own size set.
+            response = await self.client.images.generate(
+                model=model,
+                prompt=prompt,
+                size=self._nearest_size(size, ("1024x1024", "1792x1024", "1024x1792")),
+                style=style or "vivid",
+                n=1,
+            )
+        else:
+            # gpt-image-1: no `style` param, different size set, returns base64.
+            response = await self.client.images.generate(
+                model=model,
+                prompt=prompt,
+                size=self._nearest_size(size, ("1024x1024", "1536x1024", "1024x1536")),
+                n=1,
+            )
         return self._result_to_url(response)
 
     async def edit_image(self, prompt: str, source_image_paths: list[str], model: str, mask_path: str | None = None, params: dict | None = None) -> str:
+        # Only gpt-image-1 and dall-e-2 can edit images — DALL·E 3 has no edit API at all.
+        # Default to gpt-image-1 (modern + broadly available) unless dall-e-2 was explicitly chosen.
+        edit_model = "dall-e-2" if "dall-e-2" in (model or "").lower() else "gpt-image-1"
         image_data = await self._read_file(source_image_paths[0])
-        mask_data = await self._read_file(mask_path) if mask_path else None
-
-        kwargs = {
-            "model": "dall-e-2",
-            "image": image_data,
+        # Pass a (filename, bytes) tuple so the multipart upload carries a name/content-type.
+        src_name = os.path.basename(source_image_paths[0].rstrip("/")) or "image.png"
+        kwargs: dict = {
+            "model": edit_model,
+            "image": (src_name, image_data),
             "prompt": prompt,
-            "size": (params or {}).get("size", "1024x1024"),
             "n": 1,
         }
-        if mask_data:
-            kwargs["mask"] = mask_data
+        if mask_path:
+            mask_data = await self._read_file(mask_path)
+            kwargs["mask"] = ("mask.png", mask_data)
 
         response = await self.client.images.edit(**kwargs)
         return self._result_to_url(response)
+
+    def _nearest_size(self, size: str, allowed: tuple[str, ...]) -> str:
+        """Snap a requested WxH to the closest landscape/portrait/square option a model allows."""
+        if size in allowed:
+            return size
+        try:
+            w, h = map(int, size.split("x"))
+            ratio = w / h
+        except Exception:
+            return allowed[0]
+        if ratio > 1.2:  # landscape
+            return next((s for s in allowed if int(s.split("x")[0]) > int(s.split("x")[1])), allowed[0])
+        if ratio < 0.8:  # portrait
+            return next((s for s in allowed if int(s.split("x")[1]) > int(s.split("x")[0])), allowed[0])
+        return next((s for s in allowed if s.split("x")[0] == s.split("x")[1]), allowed[0])
 
     def _result_to_url(self, response) -> str:
         """Return a usable image reference from an images API response.
