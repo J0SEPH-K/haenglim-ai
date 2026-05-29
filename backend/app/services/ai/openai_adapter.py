@@ -1,7 +1,10 @@
 import base64
+import os
+import uuid
 import httpx
 from openai import AsyncOpenAI
 from app.services.ai.base import AIAdapter
+from app.config import get_settings
 
 
 class OpenAIAdapter(AIAdapter):
@@ -83,9 +86,8 @@ class OpenAIAdapter(AIAdapter):
             size=size,
             style=style,
             n=1,
-            response_format="url",
         )
-        return response.data[0].url or ""
+        return self._result_to_url(response)
 
     async def edit_image(self, prompt: str, source_image_paths: list[str], model: str, mask_path: str | None = None, params: dict | None = None) -> str:
         image_data = await self._read_file(source_image_paths[0])
@@ -97,13 +99,33 @@ class OpenAIAdapter(AIAdapter):
             "prompt": prompt,
             "size": (params or {}).get("size", "1024x1024"),
             "n": 1,
-            "response_format": "url",
         }
         if mask_data:
             kwargs["mask"] = mask_data
 
         response = await self.client.images.edit(**kwargs)
-        return response.data[0].url or ""
+        return self._result_to_url(response)
+
+    def _result_to_url(self, response) -> str:
+        """Return a usable image reference from an images API response.
+
+        Newer models (gpt-image-1) return base64 and reject `response_format`;
+        dall-e-* may return a hosted URL. Handle both: pass a URL straight through,
+        and persist base64 locally as /uploads/<name> so the caller can use it as-is.
+        """
+        item = response.data[0]
+        url = getattr(item, "url", None)
+        if url:
+            return url
+        b64 = getattr(item, "b64_json", None)
+        if b64:
+            settings = get_settings()
+            filename = f"{uuid.uuid4().hex}.png"
+            filepath = os.path.join(settings.UPLOAD_DIR, filename)
+            with open(filepath, "wb") as f:
+                f.write(base64.b64decode(b64))
+            return f"/uploads/{filename}"
+        raise Exception("OpenAI image API returned neither url nor b64_json")
 
     async def _read_file(self, path: str) -> bytes:
         if path.startswith("http"):
