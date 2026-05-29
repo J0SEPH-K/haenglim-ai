@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { useConversationStore } from '../../stores/conversationStore';
-import { sendMessage } from '../../api/messages';
+import { sendMessageStream } from '../../api/messages';
 import type { DocumentInfo } from '../../api/messages';
 import ModelSelector from './ModelSelector';
 import MessageBubble from './MessageBubble';
@@ -21,6 +21,9 @@ export default function ChatView() {
     setModelOverride(modelId || null);
   };
   const [sending, setSending] = useState(false);
+  // Live assistant text while a streamed response is in flight. null = not streaming,
+  // '' = waiting for the first token (show typing dots), non-empty = render it live.
+  const [streamingText, setStreamingText] = useState<string | null>(null);
   const [error, setError] = useState('');
   const [dragging, setDragging] = useState(false);
   const [droppedFiles, setDroppedFiles] = useState<File[]>();
@@ -136,29 +139,51 @@ export default function ChatView() {
 
     let isNewConversation = false;
     let convId = activeConversation?.conversation.id;
+    let errored = false;
+    setStreamingText(''); // '' → show typing dots until the first token arrives
     try {
       if (!convId) {
         const conv = await createConversation('chat');
         convId = conv.id;
         isNewConversation = true;
       }
-      const result = await sendMessage(convId, text, imageUrls, selectedProvider.id, documents, modelOverride);
-      setPendingUserMsg(null);
-      if (isNewConversation) {
-        navigate(`/chat/${convId}`, { replace: true });
-        await fetchConversation(convId);
+      await sendMessageStream(convId, text, imageUrls, selectedProvider.id, documents, modelOverride, {
+        onDelta: (t) => {
+          setStreamingText((prev) => (prev ?? '') + t);
+          if (isAtBottomRef.current) scrollToBottom('instant');
+        },
+        onDone: async ({ user_message, assistant_message }) => {
+          if (isNewConversation) {
+            // The new conversation now has both messages saved server-side; load them.
+            navigate(`/chat/${convId}`, { replace: true });
+            await fetchConversation(convId!);
+          } else {
+            // No typewriter — the message was already revealed live as it streamed.
+            addMessages([user_message, assistant_message]);
+          }
+          setPendingUserMsg(null);
+          setStreamingText(null);
+          fetchConversations();
+        },
+        onTitle: () => { fetchConversations(); },
+        onError: (detail) => {
+          errored = true;
+          setError(detail);
+        },
+      });
+      if (errored && isNewConversation && convId) {
+        try { await deleteConversation(convId); } catch { /* ignore cleanup error */ }
+        navigate('/chat', { replace: true });
       }
-      setTypingMsgId(result.assistant_message.id);
-      addMessages([result.user_message, result.assistant_message]);
-      fetchConversations();
     } catch (e: any) {
-      setPendingUserMsg(null);
       if (isNewConversation && convId) {
         try { await deleteConversation(convId); } catch { /* ignore cleanup error */ }
         navigate('/chat', { replace: true });
       }
-      setError(e.response?.data?.detail || '메시지 전송에 실패했습니다');
+      setError(e?.message || '메시지 전송에 실패했습니다');
     } finally {
+      setPendingUserMsg(null);
+      setStreamingText(null);
       setSending(false);
     }
   };
@@ -193,6 +218,22 @@ export default function ChatView() {
     }
   }, []);
 
+  // Live assistant bubble shown while tokens stream in (before the final message is saved).
+  const streamingBubble = streamingText && streamingText.length > 0 ? (
+    <MessageBubble
+      message={{
+        id: -2,
+        conversation_id: 0,
+        role: 'assistant',
+        text: streamingText,
+        image_url: null,
+        message_type: 'text',
+        image_params: null,
+        created_at: new Date().toISOString(),
+      }}
+    />
+  ) : null;
+
   // 첫 프롬프트 전송 중 — 입력바 하단 고정 + 사용자 메시지 표시
   if (!id && pendingUserMsg) {
     return (
@@ -221,7 +262,8 @@ export default function ChatView() {
                 created_at: new Date().toISOString(),
               }}
             />
-            {sending && (
+            {streamingBubble}
+            {sending && !streamingBubble && (
               <div className="flex items-center gap-1.5 py-2">
                 <div className="w-2 h-2 bg-gray-500 rounded-full animate-bounce" style={{ animationDelay: '0ms' }} />
                 <div className="w-2 h-2 bg-gray-500 rounded-full animate-bounce" style={{ animationDelay: '150ms' }} />

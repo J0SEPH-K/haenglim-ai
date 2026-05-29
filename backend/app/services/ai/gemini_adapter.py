@@ -23,8 +23,8 @@ class GeminiAdapter(AIAdapter):
     def supports_image_editing(self) -> bool:
         return True
 
-    async def chat(self, messages: list[dict], model: str, options: dict | None = None) -> tuple[str, dict]:
-        # Convert to Gemini format
+    async def _to_contents(self, messages: list[dict]) -> list:
+        """Convert OpenAI-style messages into Gemini Content objects."""
         contents = []
         for msg in messages:
             role = "user" if msg["role"] in ("user", "system") else "model"
@@ -43,15 +43,21 @@ class GeminiAdapter(AIAdapter):
                 contents.append(types.Content(role=role, parts=parts))
             else:
                 contents.append(types.Content(role=role, parts=[types.Part.from_text(text=content)]))
+        return contents
 
+    def _chat_config(self, options: dict | None):
         # Adaptive routing: enable Gemini's built-in google_search tool when the
         # user asks for web info. Only wired for 2.x models; on older ones the
         # SDK raises and the error bubbles up to the caller as usual.
-        gen_config = None
         if options and options.get("web_search"):
-            gen_config = types.GenerateContentConfig(
+            return types.GenerateContentConfig(
                 tools=[types.Tool(google_search=types.GoogleSearch())],
             )
+        return None
+
+    async def chat(self, messages: list[dict], model: str, options: dict | None = None) -> tuple[str, dict]:
+        contents = await self._to_contents(messages)
+        gen_config = self._chat_config(options)
 
         response = await asyncio.to_thread(
             lambda: self.client.models.generate_content(model=model, contents=contents, config=gen_config)
@@ -63,6 +69,45 @@ class GeminiAdapter(AIAdapter):
             "completion_tokens": getattr(meta, "candidates_token_count", 0) or 0,
         } if meta else {"prompt_tokens": 0, "completion_tokens": 0}
         return text, usage
+
+    async def stream_chat(self, messages, model, options=None, usage_out=None):
+        # The genai SDK's streaming generator is synchronous, so run it in a worker
+        # thread and bridge chunks back to the event loop through a queue.
+        contents = await self._to_contents(messages)
+        gen_config = self._chat_config(options)
+
+        queue: asyncio.Queue = asyncio.Queue()
+        loop = asyncio.get_running_loop()
+        SENTINEL = object()
+
+        def _produce():
+            try:
+                for chunk in self.client.models.generate_content_stream(
+                    model=model, contents=contents, config=gen_config
+                ):
+                    txt = getattr(chunk, "text", None)
+                    meta = getattr(chunk, "usage_metadata", None)
+                    loop.call_soon_threadsafe(queue.put_nowait, (txt, meta))
+            except Exception as e:  # surface provider errors to the consumer
+                loop.call_soon_threadsafe(queue.put_nowait, (e, None))
+            finally:
+                loop.call_soon_threadsafe(queue.put_nowait, (SENTINEL, None))
+
+        producer = asyncio.create_task(asyncio.to_thread(_produce))
+        try:
+            while True:
+                item, meta = await queue.get()
+                if item is SENTINEL:
+                    break
+                if isinstance(item, Exception):
+                    raise item
+                if meta is not None and usage_out is not None:
+                    usage_out["prompt_tokens"] = getattr(meta, "prompt_token_count", 0) or 0
+                    usage_out["completion_tokens"] = getattr(meta, "candidates_token_count", 0) or 0
+                if item:
+                    yield item
+        finally:
+            await producer
 
     async def generate_image(self, prompt: str, model: str, params: dict) -> str:
         """Generate an image using Gemini's image generation capability."""

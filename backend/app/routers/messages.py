@@ -5,6 +5,7 @@ import httpx
 import json
 from typing import Any
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session, joinedload
 
 from app.config import get_settings
@@ -211,6 +212,140 @@ async def send_message(
         "user_message": _message_to_out(user_msg),
         "assistant_message": _message_to_out(assistant_msg),
     }
+
+
+def _title_prompt(user_text: str | None, response_text: str) -> list[dict]:
+    return [
+        {"role": "system", "content": "사용자와 AI의 첫 대화를 보고, 이 대화의 주제를 한국어로 짧게 요약해 제목을 만들어주세요. 제목만 출력하세요. 10자 이내로 간결하게."},
+        {"role": "user", "content": f"사용자: {user_text or '(이미지)'}\n\nAI: {response_text[:500]}"},
+    ]
+
+
+@router.post("/{conversation_id}/messages/stream")
+async def send_message_stream(
+    conversation_id: int,
+    body: ChatRequest,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Streaming variant of send_message.
+
+    All validation + the user-message save happen up front (so HTTP errors are real
+    status codes). Once the response body starts, we emit newline-delimited JSON
+    events: {"type":"delta","text":...} per token, then {"type":"done", ...} with the
+    saved messages, then optionally {"type":"title", ...} for first-message titles, or
+    {"type":"error", ...} if the provider fails mid-stream.
+    """
+    # Collect image URLs from both fields for backwards compatibility
+    image_urls = body.image_urls or []
+    if body.image_url and body.image_url not in image_urls:
+        image_urls.insert(0, body.image_url)
+
+    # Extract document text if documents are attached
+    documents = body.documents or []
+    document_text_parts = []
+    document_names = []
+    settings = get_settings()
+    for doc in documents:
+        doc_path = os.path.join(settings.UPLOAD_DIR, doc.url.replace("/uploads/", "")) if doc.url.startswith("/uploads/") else doc.url
+        text = extract_text(doc_path)
+        if text:
+            document_text_parts.append(f"[{doc.original_name}]\n{text}")
+            document_names.append(doc.original_name)
+    document_text = "\n\n".join(document_text_parts) if document_text_parts else None
+
+    if not body.text and not image_urls and not documents:
+        raise HTTPException(status_code=400, detail="Message must have text, image, or document")
+
+    conv = _get_conversation(conversation_id, user, db)
+
+    provider = None
+    if body.ai_provider_id:
+        provider = db.query(AIProvider).filter(AIProvider.id == body.ai_provider_id, AIProvider.enabled == True).first()
+        if not provider:
+            raise HTTPException(status_code=400, detail="AI provider not found or disabled")
+    elif conv.ai_provider:
+        provider = conv.ai_provider
+    else:
+        raise HTTPException(status_code=400, detail="No AI provider specified")
+
+    adapter = get_adapter(provider)
+    is_first_message = len(conv.messages) == 0
+
+    has_images = len(image_urls) > 0
+    msg_params: dict = {}
+    if has_images:
+        msg_params["image_urls"] = image_urls
+    if document_names:
+        msg_params["documents"] = [{"url": d.url, "name": d.original_name, "thumbnail_url": d.thumbnail_url, "page_count": d.page_count} for d in documents]
+
+    user_msg = Message(
+        conversation_id=conv.id,
+        role="user",
+        text=body.text,
+        image_url=image_urls[0] if has_images else None,
+        message_type="document" if documents and not has_images else ("image_input" if has_images else "text"),
+        image_params=msg_params if msg_params else None,
+    )
+    db.add(user_msg)
+    db.flush()
+
+    chat_messages = await _build_chat_messages(conv, body.text, image_urls if has_images else None, provider, document_text)
+    model_id = resolve_chat_model(provider.provider_type, body.model_override or provider.model_id)
+    chat_options = detect_chat_options(body.text)
+
+    async def event_stream():
+        usage_out: dict = {}
+        parts: list[str] = []
+        try:
+            async for delta in adapter.stream_chat(chat_messages, model_id, chat_options, usage_out):
+                parts.append(delta)
+                yield json.dumps({"type": "delta", "text": delta}, ensure_ascii=False) + "\n"
+        except Exception as e:
+            db.rollback()
+            yield json.dumps({"type": "error", "detail": f"AI provider error: {str(e)}"}, ensure_ascii=False) + "\n"
+            return
+
+        response_text = "".join(parts)
+        assistant_msg = Message(
+            conversation_id=conv.id,
+            role="assistant",
+            text=response_text,
+            message_type="text",
+            ai_provider_id=provider.id,
+            model_id=model_id,
+            prompt_tokens=usage_out.get("prompt_tokens", 0),
+            completion_tokens=usage_out.get("completion_tokens", 0),
+        )
+        db.add(assistant_msg)
+        db.commit()
+        db.refresh(user_msg)
+        db.refresh(assistant_msg)
+
+        yield json.dumps({
+            "type": "done",
+            "user_message": _message_to_out(user_msg).model_dump(mode="json"),
+            "assistant_message": _message_to_out(assistant_msg).model_dump(mode="json"),
+        }, ensure_ascii=False) + "\n"
+
+        # Title generation runs after the answer is fully streamed, so it never
+        # delays the visible response; the sidebar title just pops in a moment later.
+        if is_first_message:
+            try:
+                title, _ = await adapter.chat(_title_prompt(body.text, response_text), model_id)
+                title = title.strip().strip('"').strip("'").strip()[:100]
+                if title:
+                    conv.title = title
+                    db.commit()
+                    yield json.dumps({"type": "title", "title": title, "conversation_id": conv.id}, ensure_ascii=False) + "\n"
+            except Exception:
+                pass
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="application/x-ndjson",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 @router.post("/{conversation_id}/generate-image")

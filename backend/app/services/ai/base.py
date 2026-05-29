@@ -1,4 +1,5 @@
 from abc import ABC, abstractmethod
+from typing import AsyncIterator
 
 
 Usage = dict  # {"prompt_tokens": int, "completion_tokens": int}
@@ -19,6 +20,28 @@ class AIAdapter(ABC):
           provider's native web-search tool. Silently ignore when unsupported.
         """
         ...
+
+    async def stream_chat(
+        self,
+        messages: list[dict],
+        model: str,
+        options: dict | None = None,
+        usage_out: dict | None = None,
+    ) -> AsyncIterator[str]:
+        """Yield assistant text deltas as they are generated.
+
+        `usage_out`, when provided, is mutated in place with "prompt_tokens" and
+        "completion_tokens" once known — most providers only report usage at the
+        end of the stream, so read it after the generator is exhausted.
+
+        Default implementation falls back to the non-streaming `chat()` and yields
+        the whole answer in one chunk, so adapters that don't override still work.
+        """
+        text, usage = await self.chat(messages, model, options)
+        if usage_out is not None:
+            usage_out.update(usage)
+        if text:
+            yield text
 
     @abstractmethod
     async def generate_image(self, prompt: str, model: str, params: dict) -> str:

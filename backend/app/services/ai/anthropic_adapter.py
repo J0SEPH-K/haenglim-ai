@@ -18,7 +18,7 @@ class AnthropicAdapter(AIAdapter):
     def supports_image_editing(self) -> bool:
         return False
 
-    async def chat(self, messages: list[dict], model: str, options: dict | None = None) -> tuple[str, dict]:
+    def _build_kwargs(self, messages: list[dict], model: str, options: dict | None) -> dict:
         # Separate system messages from the rest
         system_text = ""
         chat_messages = []
@@ -46,7 +46,10 @@ class AnthropicAdapter(AIAdapter):
                 "name": "web_search",
                 "max_uses": 5,
             }]
+        return kwargs
 
+    async def chat(self, messages: list[dict], model: str, options: dict | None = None) -> tuple[str, dict]:
+        kwargs = self._build_kwargs(messages, model, options)
         response = await self.client.messages.create(**kwargs)
         # When tools run, the model can emit multiple content blocks (tool_use,
         # tool_result, text). We only care about visible text blocks for the reply.
@@ -60,6 +63,17 @@ class AnthropicAdapter(AIAdapter):
             "completion_tokens": getattr(response.usage, "output_tokens", 0) or 0,
         } if getattr(response, "usage", None) else {"prompt_tokens": 0, "completion_tokens": 0}
         return text, usage
+
+    async def stream_chat(self, messages, model, options=None, usage_out=None):
+        kwargs = self._build_kwargs(messages, model, options)
+        async with self.client.messages.stream(**kwargs) as stream:
+            async for text in stream.text_stream:
+                if text:
+                    yield text
+            final = await stream.get_final_message()
+            if usage_out is not None and getattr(final, "usage", None):
+                usage_out["prompt_tokens"] = getattr(final.usage, "input_tokens", 0) or 0
+                usage_out["completion_tokens"] = getattr(final.usage, "output_tokens", 0) or 0
 
     async def generate_image(self, prompt: str, model: str, params: dict) -> str:
         raise NotImplementedError("Anthropic does not support image generation")

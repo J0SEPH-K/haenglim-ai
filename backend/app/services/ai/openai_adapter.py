@@ -35,6 +35,26 @@ class OpenAIAdapter(AIAdapter):
         } if getattr(response, "usage", None) else {"prompt_tokens": 0, "completion_tokens": 0}
         return text, usage
 
+    async def stream_chat(self, messages, model, options=None, usage_out=None):
+        if options and options.get("web_search") and "search" not in (model or "").lower():
+            model = "gpt-4o-search-preview"
+
+        stream = await self.client.chat.completions.create(
+            model=model,
+            messages=messages,
+            stream=True,
+            # Ask for a final usage-only chunk so token accounting still works.
+            stream_options={"include_usage": True},
+        )
+        async for chunk in stream:
+            if getattr(chunk, "usage", None) and usage_out is not None:
+                usage_out["prompt_tokens"] = getattr(chunk.usage, "prompt_tokens", 0) or 0
+                usage_out["completion_tokens"] = getattr(chunk.usage, "completion_tokens", 0) or 0
+            if chunk.choices:
+                delta = chunk.choices[0].delta
+                if delta and delta.content:
+                    yield delta.content
+
     async def generate_image(self, prompt: str, model: str, params: dict) -> str:
         style = params.get("style", "vivid")
         dalle_styles = {"vivid", "natural"}
