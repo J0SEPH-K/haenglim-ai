@@ -15,9 +15,8 @@ import threading
 import time
 from typing import Optional
 
-from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import JSONResponse
-from starlette.types import ASGIApp
+from starlette.types import ASGIApp, Receive, Scope, Send
 
 from app.database import SessionLocal
 from app.models.models import AppSettings, IPAllowlistEntry
@@ -49,15 +48,21 @@ def _trust_proxy() -> bool:
     return os.environ.get("TRUST_PROXY", "0").lower() in ("1", "true", "yes")
 
 
-def _client_ip_from_request(request) -> Optional[str]:
-    """Resolve the client IP, preferring X-Forwarded-For when TRUST_PROXY is set."""
+def _client_ip_from_scope(scope: Scope) -> Optional[str]:
+    """Resolve the client IP from a raw ASGI scope, preferring X-Forwarded-For when TRUST_PROXY is set."""
     if _trust_proxy():
-        xff = request.headers.get("x-forwarded-for")
-        if xff:
-            return xff.split(",")[0].strip()
-    if request.client:
-        return request.client.host
+        for k, v in scope.get("headers", []):
+            if k == b"x-forwarded-for" and v:
+                return v.decode("latin-1").split(",")[0].strip()
+    client = scope.get("client")
+    if client:
+        return client[0]
     return None
+
+
+def _client_ip_from_request(request) -> Optional[str]:
+    """Request-based convenience wrapper used by the allowlist router's 'your_ip' endpoint."""
+    return _client_ip_from_scope(request.scope)
 
 
 def _refresh_if_stale() -> None:
@@ -88,35 +93,55 @@ def _refresh_if_stale() -> None:
         _cache_ts = now
 
 
-class IPRestrictionMiddleware(BaseHTTPMiddleware):
-    def __init__(self, app: ASGIApp):
-        super().__init__(app)
+class IPRestrictionMiddleware:
+    """Pure-ASGI IP allowlist.
 
-    async def dispatch(self, request, call_next):
-        path = request.url.path
-        if request.method == "OPTIONS":
-            return await call_next(request)
-        if any(path.startswith(p) for p in _EXEMPT_PREFIXES):
-            return await call_next(request)
+    Implemented as raw ASGI (not BaseHTTPMiddleware) on purpose: BaseHTTPMiddleware
+    buffers the whole response body before forwarding it, which breaks streaming
+    responses (token-by-token chat). A pure-ASGI middleware passes `send` straight
+    through, so streamed bodies are untouched. We only ever short-circuit *before*
+    calling the inner app, so blocking a request never needs to wrap the response.
+    """
+
+    def __init__(self, app: ASGIApp):
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        path = scope.get("path", "")
+        method = scope.get("method", "")
+
+        if method == "OPTIONS" or any(path.startswith(p) for p in _EXEMPT_PREFIXES):
+            await self.app(scope, receive, send)
+            return
 
         _refresh_if_stale()
         if not _enabled:
-            return await call_next(request)
+            await self.app(scope, receive, send)
+            return
 
-        client_ip = _client_ip_from_request(request)
+        blocked: Optional[JSONResponse] = None
+        client_ip = _client_ip_from_scope(scope)
         if client_ip is None:
-            return JSONResponse(status_code=403, content={"detail": "Cannot determine client IP"})
+            blocked = JSONResponse(status_code=403, content={"detail": "Cannot determine client IP"})
+        else:
+            try:
+                addr = ipaddress.ip_address(client_ip)
+                allowed = any(addr.version == net.version and addr in net for net in _networks)
+            except ValueError:
+                allowed = False
+                blocked = JSONResponse(status_code=403, content={"detail": f"Invalid client IP: {client_ip}"})
+            if blocked is None and not allowed:
+                blocked = JSONResponse(
+                    status_code=403,
+                    content={"detail": "Access blocked by IP restriction. Contact your administrator."},
+                )
 
-        try:
-            addr = ipaddress.ip_address(client_ip)
-        except ValueError:
-            return JSONResponse(status_code=403, content={"detail": f"Invalid client IP: {client_ip}"})
+        if blocked is not None:
+            await blocked(scope, receive, send)
+            return
 
-        for net in _networks:
-            if addr.version == net.version and addr in net:
-                return await call_next(request)
-
-        return JSONResponse(
-            status_code=403,
-            content={"detail": "Access blocked by IP restriction. Contact your administrator."},
-        )
+        await self.app(scope, receive, send)
