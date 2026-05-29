@@ -32,6 +32,10 @@ export default function ChatView() {
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const isAtBottomRef = useRef(true);
   const dragCounter = useRef(0);
+  // Streamed tokens accumulate here and are flushed to React state once per animation
+  // frame, so a fast burst of tokens can't get coalesced into a single paint.
+  const streamBufRef = useRef('');
+  const rafRef = useRef<number | null>(null);
 
   const [pendingUserMsg, setPendingUserMsg] = useState<{ text: string; imageUrls?: string[]; documents?: DocumentInfo[] } | null>(null);
   const messages = activeConversation?.messages || [];
@@ -140,7 +144,16 @@ export default function ChatView() {
     let isNewConversation = false;
     let convId = activeConversation?.conversation.id;
     let errored = false;
+    streamBufRef.current = '';
     setStreamingText(''); // '' → show typing dots until the first token arrives
+
+    const cancelRaf = () => {
+      if (rafRef.current != null) {
+        cancelAnimationFrame(rafRef.current);
+        rafRef.current = null;
+      }
+    };
+
     try {
       if (!convId) {
         const conv = await createConversation('chat');
@@ -149,10 +162,18 @@ export default function ChatView() {
       }
       await sendMessageStream(convId, text, imageUrls, selectedProvider.id, documents, modelOverride, {
         onDelta: (t) => {
-          setStreamingText((prev) => (prev ?? '') + t);
-          if (isAtBottomRef.current) scrollToBottom('instant');
+          streamBufRef.current += t;
+          // Coalesce to one state update per frame so the DOM actually paints each step.
+          if (rafRef.current == null) {
+            rafRef.current = requestAnimationFrame(() => {
+              rafRef.current = null;
+              setStreamingText(streamBufRef.current);
+              if (isAtBottomRef.current) scrollToBottom('instant');
+            });
+          }
         },
         onDone: async ({ user_message, assistant_message }) => {
+          cancelRaf();
           if (isNewConversation) {
             // The new conversation now has both messages saved server-side; load them.
             navigate(`/chat/${convId}`, { replace: true });
@@ -182,6 +203,7 @@ export default function ChatView() {
       }
       setError(e?.message || '메시지 전송에 실패했습니다');
     } finally {
+      cancelRaf();
       setPendingUserMsg(null);
       setStreamingText(null);
       setSending(false);

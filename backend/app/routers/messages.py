@@ -294,16 +294,22 @@ async def send_message_stream(
     model_id = resolve_chat_model(provider.provider_type, body.model_override or provider.model_id)
     chat_options = detect_chat_options(body.text)
 
+    def _sse(payload: dict) -> str:
+        # Server-Sent Events frame. The `text/event-stream` content type is the one
+        # thing browsers are guaranteed never to buffer for MIME-sniffing, so tokens
+        # reach the fetch reader the instant they're flushed.
+        return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+
     async def event_stream():
         usage_out: dict = {}
         parts: list[str] = []
         try:
             async for delta in adapter.stream_chat(chat_messages, model_id, chat_options, usage_out):
                 parts.append(delta)
-                yield json.dumps({"type": "delta", "text": delta}, ensure_ascii=False) + "\n"
+                yield _sse({"type": "delta", "text": delta})
         except Exception as e:
             db.rollback()
-            yield json.dumps({"type": "error", "detail": f"AI provider error: {str(e)}"}, ensure_ascii=False) + "\n"
+            yield _sse({"type": "error", "detail": f"AI provider error: {str(e)}"})
             return
 
         response_text = "".join(parts)
@@ -322,11 +328,11 @@ async def send_message_stream(
         db.refresh(user_msg)
         db.refresh(assistant_msg)
 
-        yield json.dumps({
+        yield _sse({
             "type": "done",
             "user_message": _message_to_out(user_msg).model_dump(mode="json"),
             "assistant_message": _message_to_out(assistant_msg).model_dump(mode="json"),
-        }, ensure_ascii=False) + "\n"
+        })
 
         # Title generation runs after the answer is fully streamed, so it never
         # delays the visible response; the sidebar title just pops in a moment later.
@@ -337,13 +343,13 @@ async def send_message_stream(
                 if title:
                     conv.title = title
                     db.commit()
-                    yield json.dumps({"type": "title", "title": title, "conversation_id": conv.id}, ensure_ascii=False) + "\n"
+                    yield _sse({"type": "title", "title": title, "conversation_id": conv.id})
             except Exception:
                 pass
 
     return StreamingResponse(
         event_stream(),
-        media_type="application/x-ndjson",
+        media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
 

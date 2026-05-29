@@ -70,20 +70,27 @@ export async function sendMessageStream(
   const decoder = new TextDecoder();
   let buffer = '';
 
-  // Process complete newline-delimited JSON events; keep any partial tail in `buffer`.
+  const dispatch = (evt: any) => {
+    if (evt.type === 'delta') cb.onDelta(evt.text);
+    else if (evt.type === 'done') cb.onDone({ user_message: evt.user_message, assistant_message: evt.assistant_message });
+    else if (evt.type === 'title') cb.onTitle?.(evt.title, evt.conversation_id);
+    else if (evt.type === 'error') cb.onError?.(evt.detail);
+  };
+
+  // Parse Server-Sent Events: frames are separated by a blank line, and the
+  // payload lives on one or more `data:` lines within each frame.
   const flush = (chunk: string) => {
     buffer += chunk;
-    const lines = buffer.split('\n');
-    buffer = lines.pop() || '';
-    for (const line of lines) {
-      const trimmed = line.trim();
-      if (!trimmed) continue;
-      let evt: any;
-      try { evt = JSON.parse(trimmed); } catch { continue; }
-      if (evt.type === 'delta') cb.onDelta(evt.text);
-      else if (evt.type === 'done') cb.onDone({ user_message: evt.user_message, assistant_message: evt.assistant_message });
-      else if (evt.type === 'title') cb.onTitle?.(evt.title, evt.conversation_id);
-      else if (evt.type === 'error') cb.onError?.(evt.detail);
+    const frames = buffer.split('\n\n');
+    buffer = frames.pop() || ''; // keep the incomplete trailing frame
+    for (const frame of frames) {
+      const data = frame
+        .split('\n')
+        .filter((l) => l.startsWith('data:'))
+        .map((l) => l.slice(5).trim())
+        .join('');
+      if (!data) continue;
+      try { dispatch(JSON.parse(data)); } catch { /* ignore malformed frame */ }
     }
   };
 
